@@ -14,7 +14,7 @@ Thanks for your interest in contributing. This guide covers everything you need 
 
 ```bash
 git clone https://github.com/<your-fork>/openwhispr.git
-cd openwhispr/apps/mobile
+cd openwhispr/openwhispr-mobile
 npm install
 cp .env.example .env
 ```

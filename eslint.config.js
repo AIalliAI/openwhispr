@@ -9,7 +9,7 @@ module.exports = [
       "src/dist/**",
       "*.min.js",
       "build/**",
-      "apps/mobile/**", // mobile has its own ESLint configuration
+      "openwhispr-mobile/**", // mobile has its own ESLint configuration
       "src/**", // src has its own config
     ],
   },

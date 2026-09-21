@@ -18,7 +18,10 @@ function classifyPaths(paths) {
       desktop = true;
       mobile = true;
       build = true;
-    } else if (path.startsWith("apps/mobile/") || path === ".github/workflows/mobile-ci.yml") {
+    } else if (
+      path.startsWith("openwhispr-mobile/") ||
+      path === ".github/workflows/mobile-ci.yml"
+    ) {
       mobile = true;
     } else {
       desktop = true;

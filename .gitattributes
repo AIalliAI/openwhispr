@@ -1,1 +1,1 @@
-apps/mobile/patches/*.patch -whitespace
+openwhispr-mobile/patches/*.patch -whitespace

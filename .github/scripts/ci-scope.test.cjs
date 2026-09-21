@@ -12,9 +12,9 @@ test("desktop source and dependency changes only select desktop", () => {
 
 test("mobile source, dependencies, docs and workflow only select mobile", () => {
   for (const path of [
-    "apps/mobile/app/index.tsx",
-    "apps/mobile/package-lock.json",
-    "apps/mobile/README.md",
+    "openwhispr-mobile/app/index.tsx",
+    "openwhispr-mobile/package-lock.json",
+    "openwhispr-mobile/README.md",
     ".github/workflows/mobile-ci.yml",
   ]) {
     assert.deepEqual(classifyPaths([path]), { desktop: false, mobile: true, build: false });
@@ -22,7 +22,7 @@ test("mobile source, dependencies, docs and workflow only select mobile", () => 
 });
 
 test("mixed changes and cross-app renames select both", () => {
-  assert.deepEqual(classifyPaths(["src/old.ts", "apps/mobile/src/new.ts"]), {
+  assert.deepEqual(classifyPaths(["src/old.ts", "openwhispr-mobile/src/new.ts"]), {
     desktop: true,
     mobile: true,
     build: true,
@@ -67,7 +67,7 @@ test("desktop workflows do not select mobile", () => {
 });
 
 test("handles large diffs and unusual file names without truncation", () => {
-  const paths = Array.from({ length: 500 }, (_, index) => `apps/mobile/src/file-${index}.ts`);
+  const paths = Array.from({ length: 500 }, (_, index) => `openwhispr-mobile/src/file-${index}.ts`);
   paths.push("src/file with\na newline.ts");
   assert.deepEqual(classifyPaths(paths), { desktop: true, mobile: true, build: true });
 });

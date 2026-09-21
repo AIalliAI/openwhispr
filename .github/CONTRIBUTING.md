@@ -55,9 +55,9 @@ in [`README.md`](../README.md) and
 [`LOCAL_WHISPER_SETUP.md`](../LOCAL_WHISPER_SETUP.md).
 
 The Expo mobile application is maintained separately in
-[`apps/mobile`](../apps/mobile/) with its own dependencies, lockfile, and
+[`openwhispr-mobile`](../openwhispr-mobile/) with its own dependencies, lockfile, and
 development commands. Follow its
-[`CONTRIBUTING.md`](../apps/mobile/CONTRIBUTING.md) when changing mobile code.
+[`CONTRIBUTING.md`](../openwhispr-mobile/CONTRIBUTING.md) when changing mobile code.
 
 ### CI scope and required checks
 
@@ -65,7 +65,7 @@ PR checks follow the files changed:
 
 | Changed files                                                                          | Application checks |
 | -------------------------------------------------------------------------------------- | ------------------ |
-| `apps/mobile/**` or the mobile CI workflow                                             | Mobile only        |
+| `openwhispr-mobile/**` or the mobile CI workflow                                       | Mobile only        |
 | Desktop files at the repository root, including its dependencies and workflows         | Desktop only       |
 | Files from both applications                                                           | Both               |
 | Shared CI routing, CodeQL configuration, Dependabot configuration, or `.gitattributes` | Both               |

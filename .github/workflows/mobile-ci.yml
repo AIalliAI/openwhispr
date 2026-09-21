@@ -33,12 +33,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version-file: apps/mobile/.nvmrc
+          node-version-file: openwhispr-mobile/.nvmrc
       # Validate before installing packages from the contributor's lockfile.
       - name: Validate dependency sources and integrity
-        run: npx --yes --ignore-scripts --package=lockfile-lint@5.0.1 lockfile-lint --path apps/mobile/package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity
+        run: npx --yes --ignore-scripts --package=lockfile-lint@5.0.1 lockfile-lint --path openwhispr-mobile/package-lock.json --type npm --validate-https --allowed-hosts npm --validate-integrity
       - name: Reject high and critical dependency advisories
-        working-directory: apps/mobile
+        working-directory: openwhispr-mobile
         run: npm audit --package-lock-only --ignore-scripts --audit-level=high
 
   checks:
@@ -53,16 +53,16 @@ jobs:
         check: [static, tests, bundles]
     defaults:
       run:
-        working-directory: apps/mobile
+        working-directory: openwhispr-mobile
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version-file: apps/mobile/.nvmrc
+          node-version-file: openwhispr-mobile/.nvmrc
           cache: npm
-          cache-dependency-path: apps/mobile/package-lock.json
+          cache-dependency-path: openwhispr-mobile/package-lock.json
       - name: Install locked dependencies without lifecycle scripts
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Apply reviewed dependency patches

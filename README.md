@@ -66,7 +66,7 @@ npm run dev
 
 Requires Node.js 24+. See the [full documentation](https://docs.openwhispr.com/quickstart) for setup guides, platform-specific instructions, and build details.
 
-The commands above run the desktop application, which remains at the repository root. The Expo mobile application lives in [`apps/mobile`](apps/mobile/) with its own dependencies, lockfile, build configuration, and release process. See the [mobile README](apps/mobile/README.md) for its setup instructions.
+The commands above run the desktop application, which remains at the repository root. The Expo mobile application lives in [`openwhispr-mobile`](openwhispr-mobile/) with its own dependencies, lockfile, build configuration, and release process. See the [mobile README](openwhispr-mobile/README.md) for its setup instructions.
 
 ## Documentation
 
