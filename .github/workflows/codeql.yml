@@ -20,9 +20,9 @@ jobs:
     uses: ./.github/workflows/ci-changes.yml
 
   analyze:
-    name: Analyze (${{ matrix.scope }})
+    name: Analyze (desktop)
     needs: changes
-    if: needs.changes.outputs.desktop == 'true' || needs.changes.outputs.mobile == 'true'
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -31,7 +31,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scope: ${{ fromJSON(needs.changes.outputs.codeql-scopes) }}
+        # Preserve the main-branch analysis identity for PR comparisons.
+        language: [javascript-typescript]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@ed1a0fa18ac745d017ca370dd4ef08bba3b4f504 # v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config: '{"paths-ignore":["apps/mobile/**"]}'
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@ed1a0fa18ac745d017ca370dd4ef08bba3b4f504 # v3
+        with:
+          category: /language:${{ matrix.language }}
+
+  analyze-mobile:
+    name: Analyze (mobile)
+    needs: changes
+    if: needs.changes.outputs.mobile == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -43,16 +71,16 @@ jobs:
         with:
           languages: javascript-typescript
           build-mode: none
-          config: ${{ matrix.scope == 'mobile' && '{"paths":["apps/mobile"]}' || '{"paths-ignore":["apps/mobile/**"]}' }}
+          config: '{"paths":["apps/mobile"]}'
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@ed1a0fa18ac745d017ca370dd4ef08bba3b4f504 # v3
         with:
-          category: /language:javascript-typescript/${{ matrix.scope }}
+          category: /language:javascript-typescript/mobile
 
   codeql-status:
     name: CodeQL CI
-    needs: [changes, analyze]
+    needs: [changes, analyze, analyze-mobile]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -63,9 +91,13 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           DESKTOP: ${{ needs.changes.outputs.desktop }}
           MOBILE: ${{ needs.changes.outputs.mobile }}
-          ANALYZE_RESULT: ${{ needs.analyze.result }}
+          DESKTOP_RESULT: ${{ needs.analyze.result }}
+          MOBILE_RESULT: ${{ needs.analyze-mobile.result }}
         run: |
           test "$CHANGES_RESULT" = success
-          if [ "$DESKTOP" = true ] || [ "$MOBILE" = true ]; then
-            test "$ANALYZE_RESULT" = success
+          if [ "$DESKTOP" = true ]; then
+            test "$DESKTOP_RESULT" = success
+          fi
+          if [ "$MOBILE" = true ]; then
+            test "$MOBILE_RESULT" = success
           fi

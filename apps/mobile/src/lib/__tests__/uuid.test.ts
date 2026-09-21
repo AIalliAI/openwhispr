@@ -1,37 +1,59 @@
 describe('randomUUID', () => {
-  afterEach(() => {
+  beforeEach(() => {
     jest.resetModules();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
     jest.dontMock('expo-crypto');
   });
 
-  it('falls back to a locally-generated id when the native module returns falsy (the real jest-expo condition today)', () => {
-    // No mocking here: this exercises the actual environment gap this
-    // fallback exists for — expo-crypto's native module isn't wired up
-    // under jest-expo, so Crypto.randomUUID() resolves to undefined.
+  it('returns the UUID produced by Expo Crypto', () => {
+    const nativeUUID = 'ac028740-f771-4e64-bde7-f0c334e4d653';
+    jest.doMock('expo-crypto', () => ({ randomUUID: () => nativeUUID }));
     const { randomUUID } = require('../uuid') as typeof import('../uuid');
 
-    const id = randomUUID();
-
-    expect(typeof id).toBe('string');
-    expect(id.length).toBeGreaterThan(10);
-    // v4-shaped: 8-4-4-4-12 hex groups, version nibble 4, variant nibble 8-b.
-    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(randomUUID()).toBe(nativeUUID);
   });
 
-  it('produces different ids across calls', () => {
+  it.each([undefined, null, ''])('fails closed when Expo Crypto returns %p', (value) => {
+    jest.doMock('expo-crypto', () => ({ randomUUID: () => value }));
     const { randomUUID } = require('../uuid') as typeof import('../uuid');
+    const insecureRandom = jest.spyOn(Math, 'random');
 
-    const ids = new Set(Array.from({ length: 20 }, () => randomUUID()));
+    let failure: unknown;
+    try {
+      randomUUID();
+    } catch (error) {
+      failure = error;
+    }
+    const insecureCalls = insecureRandom.mock.calls.length;
+    insecureRandom.mockRestore();
 
-    expect(ids.size).toBe(20);
+    expect(failure).toEqual(new Error('Secure UUID generation is unavailable'));
+    expect(insecureCalls).toBe(0);
   });
 
-  it('uses the native value when expo-crypto actually returns one', () => {
-    jest.resetModules();
-    jest.doMock('expo-crypto', () => ({ randomUUID: () => 'native-uuid-value' }));
-
+  it('propagates native failures without falling back to insecure randomness', () => {
+    const nativeError = new Error('Native crypto unavailable');
+    jest.doMock('expo-crypto', () => ({
+      randomUUID: () => {
+        throw nativeError;
+      },
+    }));
     const { randomUUID } = require('../uuid') as typeof import('../uuid');
+    const insecureRandom = jest.spyOn(Math, 'random');
 
-    expect(randomUUID()).toBe('native-uuid-value');
+    let failure: unknown;
+    try {
+      randomUUID();
+    } catch (error) {
+      failure = error;
+    }
+    const insecureCalls = insecureRandom.mock.calls.length;
+    insecureRandom.mockRestore();
+
+    expect(failure).toBe(nativeError);
+    expect(insecureCalls).toBe(0);
   });
 });

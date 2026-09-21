@@ -83,8 +83,11 @@ and App Store submissions remain separate release checks. Fork PR jobs receive n
 Expo or Apple credentials and cannot deploy.
 
 Repository maintainers should require **Desktop CI**, **Mobile CI**, **CodeQL CI**,
-and **lockfile-lint** in the GitHub ruleset, replacing individual build/matrix checks
-and the previous CodeQL check. The lockfile job is skipped successfully for mobile
+and **lockfile-lint** in the GitHub ruleset, replacing individual build/matrix checks.
+Also require GitHub's **CodeQL** code-scanning results check (or a CodeQL code-scanning
+merge-protection rule). **CodeQL CI** only confirms that the selected scans completed;
+it does not enforce alert severity. Retain the security-results check to block new
+high/critical findings. The lockfile job is skipped successfully for mobile
 changes, whose lockfile is covered by Mobile CI. Require review before merging,
 including explicit review of workflow and dependency changes, and enable approval
 for workflows from outside contributors. Ruleset settings are managed on GitHub;

@@ -70,11 +70,9 @@ function main() {
       console.warn("Unable to determine changed paths; running both applications' checks.");
     }
   }
-  const codeqlScopes = ["desktop", "mobile"].filter((name) => scope[name]);
-  const outputs = { ...scope, "codeql-scopes": JSON.stringify(codeqlScopes) };
   appendFileSync(
     process.env.GITHUB_OUTPUT,
-    Object.entries(outputs)
+    Object.entries(scope)
       .map(([key, value]) => `${key}=${value}\n`)
       .join("")
   );

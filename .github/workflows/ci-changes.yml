@@ -9,8 +9,6 @@ on:
         value: ${{ jobs.changes.outputs.mobile }}
       build:
         value: ${{ jobs.changes.outputs.build }}
-      codeql-scopes:
-        value: ${{ jobs.changes.outputs.codeql-scopes }}
 
 permissions:
   contents: read
@@ -23,7 +21,6 @@ jobs:
       desktop: ${{ steps.scope.outputs.desktop }}
       mobile: ${{ steps.scope.outputs.mobile }}
       build: ${{ steps.scope.outputs.build }}
-      codeql-scopes: ${{ steps.scope.outputs.codeql-scopes }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
