@@ -4,6 +4,12 @@ const fs = require("fs");
 const debugLogger = require("./debugLogger");
 const dockManager = require("./dockManager");
 const { i18nMain } = require("./i18nMain");
+const { windowsTrayIdentity } = require("../../package.json");
+
+// Permanent identity for signed production Windows builds; keep across releases.
+// Windows binds an unsigned executable's GUID to its path, so only builds from the
+// signed config, which sets windowsTrayIdentity, may use it.
+const WINDOWS_PRODUCTION_TRAY_GUID = "9afd9bd5-53da-42ef-8334-6e2b494c66fe";
 
 // macOS saves the menu-bar position under this GUID, so changing it resets every
 // user's placement. Electron lowercases the GUID before handing it to macOS, so
@@ -152,6 +158,14 @@ class TrayManager {
         systemPreferences.registerDefaults({ [MACOS_TRAY_POSITION_KEY]: 0 });
         this.tray = new Tray(trayIcon, MACOS_TRAY_GUID);
         this.tray.setIgnoreDoubleClickEvents(true);
+      } else if (
+        process.platform === "win32" &&
+        process.env.OPENWHISPR_CHANNEL === "production" &&
+        windowsTrayIdentity === true
+      ) {
+        // Other channels have their own profile and single-instance lock, so they can
+        // run beside production and must not claim its GUID.
+        this.tray = new Tray(trayIcon, WINDOWS_PRODUCTION_TRAY_GUID);
       } else {
         this.tray = new Tray(trayIcon);
       }
