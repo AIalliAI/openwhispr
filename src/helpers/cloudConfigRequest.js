@@ -23,8 +23,12 @@ function createCloudConfigRequestHandler({
     }
 
     try {
+      // The caller keeps its own freshness window; a Chromium-cached copy would
+      // re-serve a route the server already withdrew (e.g. after a refused
+      // Orukeet session invalidates the in-memory config).
       const response = await proxyFetch(`${apiUrl}/api/${configPath}`, {
         headers: withPolicyHeaders(authHeader),
+        cache: "no-store",
       });
       if (!response.ok) {
         if (response.status === 401) {

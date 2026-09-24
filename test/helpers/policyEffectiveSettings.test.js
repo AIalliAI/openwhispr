@@ -96,6 +96,11 @@ test("managed transcription fallback binds known providers to their canonical en
   const customEndpoint = "https://custom.example.invalid/v1";
   installBrowserGlobals(t, {
     initialStorage: {
+      // Sentinels, so the one-shot copies leave the scoped selections this case
+      // is about alone.
+      _providerSettingsMigrated: "1",
+      uploadTranscriptionMigrated: "true",
+      meetingFollowsTranscription: "false",
       transcriptionMode: "providers",
       cloudTranscriptionProvider: "custom",
       cloudTranscriptionModel: "custom-model",
@@ -235,4 +240,85 @@ test("Note Recording never inherits an unsupported self-hosted policy fallback",
   assert.equal(effective.uploadTranscriptionMode, "self-hosted");
   assert.equal(effective.meetingTranscriptionMode, "local");
   assert.equal(effective.meetingUseLocalWhisper, true);
+});
+
+test("a managed screen-context denial forces the effective setting off without touching the preference", async (t) => {
+  const browser = installBrowserGlobals(t, {
+    initialStorage: { voiceAgentScreenContext: "true" },
+  });
+  const vite = await createRendererServer(t, {
+    cachePrefix: "openwhispr-policy-screen-context-test-",
+  });
+  const { usePolicyStore } = await vite.ssrLoadModule("/stores/policyStore.ts");
+  const { getSettings, useSettingsStore } = await vite.ssrLoadModule("/stores/settingsStore.ts");
+
+  usePolicyStore.setState({
+    status: "managed",
+    managed: true,
+    policy: {
+      ...managedPolicy,
+      features: { ...managedPolicy.features, screenContextEnabled: false },
+    },
+    appVersion: "1.8.1",
+  });
+
+  assert.equal(getSettings().voiceAgentScreenContext, false);
+  // The raw preference survives the policy for when it lifts.
+  assert.equal(useSettingsStore.getState().voiceAgentScreenContext, true);
+  assert.equal(browser.storage.getItem("voiceAgentScreenContext"), "true");
+
+  // A policy that omits the field (older server) leaves the setting alone.
+  usePolicyStore.setState({
+    status: "managed",
+    managed: true,
+    policy: managedPolicy,
+    appVersion: "1.8.1",
+  });
+  assert.equal(getSettings().voiceAgentScreenContext, true);
+
+  usePolicyStore.setState({ status: "unmanaged", managed: false, policy: null });
+  assert.equal(getSettings().voiceAgentScreenContext, true);
+});
+
+test("an enterprise-only transcription policy resolves for dictation and upload", async (t) => {
+  installBrowserGlobals(t, {
+    initialStorage: {
+      _providerSettingsMigrated: "1",
+      uploadTranscriptionMigrated: "true",
+      transcriptionMode: "providers",
+      useLocalWhisper: "false",
+    },
+  });
+  const vite = await createRendererServer(t, {
+    cachePrefix: "openwhispr-policy-effective-transcription-enterprise-test-",
+  });
+  const { usePolicyStore } = await vite.ssrLoadModule("/stores/policyStore.ts");
+  const { getSettings, useSettingsStore } = await vite.ssrLoadModule("/stores/settingsStore.ts");
+  const { isTranscriptionContextAllowed } = await vite.ssrLoadModule("/stores/policyRules.ts");
+
+  usePolicyStore.setState({
+    status: "managed",
+    managed: true,
+    policy: {
+      ...managedPolicy,
+      transcription: {
+        allowedModes: ["enterprise"],
+        allowedByokProviders: [],
+        allowedEnterpriseProviders: ["azure"],
+      },
+    },
+    appVersion: "1.10.0",
+  });
+
+  const effective = getSettings();
+  assert.equal(effective.transcriptionMode, "enterprise");
+  assert.equal(effective.useLocalWhisper, false);
+  assert.equal(effective.uploadTranscriptionMode, "enterprise");
+  assert.equal(
+    isTranscriptionContextAllowed(usePolicyStore.getState(), effective, "dictation"),
+    true
+  );
+  assert.equal(isTranscriptionContextAllowed(usePolicyStore.getState(), effective, "upload"), true);
+  // Raw preferences are untouched.
+  assert.equal(useSettingsStore.getState().transcriptionMode, "providers");
 });

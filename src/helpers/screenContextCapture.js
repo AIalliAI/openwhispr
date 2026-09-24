@@ -24,12 +24,31 @@ function isWaylandSession() {
   );
 }
 
+// macOS applies a Screen Recording grant only at process launch:
+// getMediaAccessStatus flips to "granted" the moment the user toggles System
+// Settings, but desktopCapturer keeps returning stale/blank frames until the
+// app relaunches. Snapshot the first reading to detect mid-session grants.
+let launchStatus = null;
+
 function getAccessStatus() {
   if (isWaylandSession()) return "unsupported";
   if (process.platform === "darwin") {
-    return systemPreferences.getMediaAccessStatus("screen");
+    const status = systemPreferences.getMediaAccessStatus("screen");
+    if (launchStatus === null) launchStatus = status;
+    return status;
   }
   return "granted";
+}
+
+function getAccessResult() {
+  const status = getAccessStatus();
+  return {
+    granted: status === "granted",
+    status,
+    supported: status !== "unsupported",
+    needsRelaunch:
+      process.platform === "darwin" && status === "granted" && launchStatus !== "granted",
+  };
 }
 
 // Encodes from the same source bitmap at each step, so lowering quality never
@@ -45,14 +64,22 @@ function encodeWithinBudget(image) {
   return smallest.length <= MAX_ENCODED_BYTES ? smallest : null;
 }
 
+// Photographs the display showing the app being dictated into, given that app's
+// window rect; without one it falls back to the display under the cursor, which
+// on a multi-monitor desk is often not the screen the user is working on.
 // Returns null on any failure — a screenshot must never break the dictation
 // it accompanies.
-async function captureCursorDisplay() {
-  if (getAccessStatus() !== "granted") return null;
+async function captureActiveDisplay(targetBounds = null) {
+  const accessStatus = getAccessStatus();
+  if (accessStatus !== "granted") {
+    debugLogger.warn("Screen context capture skipped", { accessStatus }, "screenContext");
+    return null;
+  }
 
   try {
-    const cursor = screen.getCursorScreenPoint();
-    const display = screen.getDisplayNearestPoint(cursor);
+    const display = targetBounds
+      ? screen.getDisplayMatching(targetBounds)
+      : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
     const scale = Math.min(1, MAX_EDGE_PX / Math.max(display.size.width, display.size.height));
     const thumbnailSize = {
       width: Math.max(1, Math.round(display.size.width * scale)),
@@ -62,7 +89,10 @@ async function captureCursorDisplay() {
     const sources = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize });
     // display_id can be empty on some Linux setups — fall back to the first screen.
     const source = sources.find((s) => s.display_id === String(display.id)) || sources[0];
-    if (!source || source.thumbnail.isEmpty()) return null;
+    if (!source || source.thumbnail.isEmpty()) {
+      debugLogger.warn("Screen context capture found no screen source", {}, "screenContext");
+      return null;
+    }
 
     const encoded = encodeWithinBudget(source.thumbnail);
     if (!encoded) {
@@ -89,4 +119,4 @@ async function requestAccess() {
   return getAccessStatus();
 }
 
-module.exports = { getAccessStatus, captureCursorDisplay, requestAccess };
+module.exports = { getAccessStatus, getAccessResult, captureActiveDisplay, requestAccess };

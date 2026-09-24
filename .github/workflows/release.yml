@@ -45,7 +45,7 @@ jobs:
       - name: Check translations
         run: npm run i18n:check
       - name: Audit dependencies
-        run: npm audit
+        run: npm audit --audit-level=high
       - name: Build better-sqlite3 for the runner's node
         # --ignore-scripts skips the native build, so DB-backed tests silently
         # skip unless the binding is rebuilt for the CI Node runtime.
@@ -114,7 +114,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/electron
-          key: linux-electron-${{ hashFiles('**/package-lock.json') }}
+          key: linux-electron-${{ hashFiles('package-lock.json') }}
           restore-keys: linux-electron-
 
       - name: Install Linux build and packaging dependencies
@@ -138,6 +138,7 @@ jobs:
         run: npm run build:linux -- --publish always
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          BRAND_FONTS_REQUIRED: "1"
           VITE_AUTH_URL: ${{ vars.VITE_AUTH_URL || 'https://auth.openwhispr.com' }}
           VITE_OPENWHISPR_API_URL: ${{ vars.VITE_OPENWHISPR_API_URL }}
           VITE_OPENWHISPR_OAUTH_CALLBACK_URL: ${{ vars.VITE_OPENWHISPR_OAUTH_CALLBACK_URL }}
@@ -154,6 +155,9 @@ jobs:
           node-version: "24"
           cache: "npm"
 
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install dependencies
         run: npm ci
 
@@ -164,9 +168,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: resources/bin
-          # The system-audio helper source is in the key so a republished
-          # helper binary invalidates the cached copy.
-          key: windows-x64-bin-${{ hashFiles('scripts/download-*.js', 'resources/windows-system-audio-helper.c') }}
+          # Native helper sources are in the key so source changes cannot
+          # restore stale helper binaries from the cache.
+          key: windows-x64-bin-${{ hashFiles('scripts/download-*.js', 'resources/windows-system-audio-helper.c', 'resources/windows-mic-listener.c') }}
 
       - name: Download whisper.cpp binaries
         run: node scripts/download-whisper-cpp.js --current
@@ -211,10 +215,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
-      - name: Download windows-mic-listener.exe
-        run: node scripts/download-windows-mic-listener.js
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      - name: Compile windows-mic-listener.exe
+        shell: cmd
+        run: |
+          if not exist resources\bin mkdir resources\bin
+          cl /O2 /nologo resources\windows-mic-listener.c /Fe:resources\bin\windows-mic-listener.exe ole32.lib oleaut32.lib
 
       - name: Download windows-system-audio-helper.exe
         run: node scripts/download-windows-system-audio-helper.js
@@ -229,7 +234,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/AppData/Local/electron/Cache
-          key: windows-electron-${{ hashFiles('**/package-lock.json') }}
+          key: windows-electron-${{ hashFiles('package-lock.json') }}
           restore-keys: windows-electron-
 
       - name: Create runtime env
@@ -243,6 +248,7 @@ jobs:
         run: npm run build:win -- --publish always
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          BRAND_FONTS_REQUIRED: "1"
           VITE_AUTH_URL: ${{ vars.VITE_AUTH_URL || 'https://auth.openwhispr.com' }}
           VITE_OPENWHISPR_API_URL: ${{ vars.VITE_OPENWHISPR_API_URL }}
           VITE_OPENWHISPR_OAUTH_CALLBACK_URL: ${{ vars.VITE_OPENWHISPR_OAUTH_CALLBACK_URL }}
@@ -325,7 +331,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/electron
-          key: macos-${{ matrix.arch }}-electron-${{ hashFiles('**/package-lock.json') }}
+          key: macos-${{ matrix.arch }}-electron-${{ hashFiles('package-lock.json') }}
           restore-keys: macos-${{ matrix.arch }}-electron-
 
       - name: Setup macOS Code Signing
@@ -363,6 +369,7 @@ jobs:
         env:
           TARGET_ARCH: ${{ matrix.arch }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          BRAND_FONTS_REQUIRED: "1"
           VITE_AUTH_URL: ${{ vars.VITE_AUTH_URL || 'https://auth.openwhispr.com' }}
           VITE_OPENWHISPR_API_URL: ${{ vars.VITE_OPENWHISPR_API_URL }}
           VITE_OPENWHISPR_OAUTH_CALLBACK_URL: ${{ vars.VITE_OPENWHISPR_OAUTH_CALLBACK_URL }}
@@ -378,6 +385,7 @@ jobs:
           for bin in macos-audio-tap macos-globe-listener macos-fast-paste macos-mic-listener macos-text-monitor macos-media-remote; do
             test -x "$APP_PATH/Contents/Resources/bin/$bin" || { echo "Missing in bundle: $bin"; exit 1; }
           done
+          node scripts/verify-macos-parakeet.js "$APP_PATH"
 
       - name: Upload arch-specific update metadata
         env:

@@ -10,10 +10,11 @@ import {
   Keyboard,
   CreditCard,
   Shield,
+  ShieldCheck,
   Users,
-} from "lucide-react";
+} from "./icons";
 import SidebarModal, { type SidebarItem } from "./ui/SidebarModal";
-import SettingsPage, { SettingsSectionType } from "./SettingsPage";
+import SettingsPage, { AccountAvatar, SettingsSectionType } from "./SettingsPage";
 import { useAuth } from "../hooks/useAuth";
 
 export type { SettingsSectionType };
@@ -21,10 +22,12 @@ export type { SettingsSectionType };
 // The old AI Models sidebar had four items (transcription, meetings,
 // intelligence, agentMode) — they now collapse into two: speechToText + llms.
 // Legacy deep-links land on the matching sub-tab via LEGACY_SUB_TAB.
+// "dictationAgent" is a live deep-link (the Home GPU banner), not a legacy alias.
 const SECTION_ALIASES: Record<string, SettingsSectionType> = {
   aiModels: "llms",
   agentConfig: "llms",
   agentMode: "llms",
+  dictationAgent: "llms",
   intelligence: "llms",
   meetings: "llms",
   prompts: "llms",
@@ -39,6 +42,7 @@ const SECTION_ALIASES: Record<string, SettingsSectionType> = {
 const LEGACY_SUB_TAB: Record<string, string> = {
   transcription: "dictation",
   uploadTranscription: "upload",
+  dictationAgent: "dictationAgent",
   meetings: "noteFormatting",
   intelligence: "dictationCleanup",
   agentMode: "chatIntelligence",
@@ -55,7 +59,7 @@ interface SettingsModalProps {
 
 export default function SettingsModal({ open, onOpenChange, initialSection }: SettingsModalProps) {
   const { t } = useTranslation();
-  const { isSignedIn } = useAuth();
+  const { isSignedIn, user } = useAuth();
   const policyManaged = usePolicyStore((s) => s.managed);
   const sidebarItems: SidebarItem<SettingsSectionType>[] = useMemo(() => {
     const items: SidebarItem<SettingsSectionType>[] = [
@@ -161,12 +165,30 @@ export default function SettingsModal({ open, onOpenChange, initialSection }: Se
       sidebarItems={sidebarItems}
       activeSection={activeSection}
       onSectionChange={handleSectionChange}
+      header={
+        isSignedIn && user ? (
+          <div className="flex flex-col items-center gap-2 pb-2 text-center">
+            <AccountAvatar image={user.image} name={user.name || t("settingsPage.account.user")} />
+            <div className="min-w-0 w-full">
+              <p dir="auto" className="text-[13px] font-semibold text-foreground truncate">
+                {user.name || t("settingsPage.account.user")}
+              </p>
+              <p className="text-xs text-muted-foreground truncate">
+                <bdi dir="ltr">{user.email}</bdi>
+              </p>
+            </div>
+          </div>
+        ) : undefined
+      }
+      notice={
+        policyManaged ? (
+          <>
+            <ShieldCheck className="h-4 w-4 shrink-0" />
+            {t("settingsModal.managedByOrg")}
+          </>
+        ) : undefined
+      }
     >
-      {policyManaged && (
-        <div className="mx-4 mt-4 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200">
-          {t("settingsModal.managedByOrg")}
-        </div>
-      )}
       <SettingsPage
         activeSection={activeSection}
         onNavigateToSection={handleSectionChange}

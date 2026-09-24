@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Check, Copy, Link2, Loader2, MoreHorizontal, Users } from "lucide-react";
+import { Check, Copy, FileText, Link2, Loader2, MoreHorizontal, Users } from "../icons";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import {
@@ -54,13 +54,29 @@ const SHARE_VISIBILITY_OPTIONS: Array<{ id: ShareVisibility }> = [
   { id: "domain" },
 ];
 
+export interface NoteExportOption {
+  id: string;
+  label: string;
+  onSelect: () => void;
+}
+
 interface ShareNoteDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   note: NoteItem;
+  /** Local export formats offered below the sharing controls. */
+  exportOptions?: NoteExportOption[];
+  /** Opened from the link segment of the Share button: copy the link as soon as it is usable. */
+  copyLinkOnOpen?: boolean;
 }
 
-export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteDialogProps) {
+export default function ShareNoteDialog({
+  open,
+  onOpenChange,
+  note,
+  exportOptions = [],
+  copyLinkOnOpen = false,
+}: ShareNoteDialogProps) {
   const { user } = useAuth();
   const ownerName: string | null = user?.name ?? null;
   const ownerEmail: string = user?.email ?? "";
@@ -91,6 +107,8 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
   const [submitting, setSubmitting] = useState(false);
   const [suggestions, setSuggestions] = useState<AccessPrincipalSuggestion[]>([]);
   const [searchingSuggestions, setSearchingSuggestions] = useState(false);
+  // True once a search resolved for the current input, so zero matches can say so.
+  const [suggestionsSettled, setSuggestionsSettled] = useState(false);
   const [copied, setCopied] = useState(false);
   const [resendingId, setResendingId] = useState<string | null>(null);
   const [busyGrantId, setBusyGrantId] = useState<string | null>(null);
@@ -234,14 +252,19 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
     if (!open || !cloudId || !canSearchPrincipals || !query) {
       setSuggestions([]);
       setSearchingSuggestions(false);
+      setSuggestionsSettled(false);
       return;
     }
     let cancelled = false;
     setSearchingSuggestions(true);
+    setSuggestionsSettled(false);
     const timer = window.setTimeout(() => {
       NoteSharingService.searchAccessPrincipals(cloudId, query)
         .then((res) => {
-          if (!cancelled) setSuggestions(res.suggestions.filter((item) => !item.existing_grant_id));
+          if (!cancelled) {
+            setSuggestions(res.suggestions.filter((item) => !item.existing_grant_id));
+            setSuggestionsSettled(true);
+          }
         })
         .catch(() => {
           if (!cancelled) setSuggestions([]);
@@ -399,6 +422,18 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
       setLinkBusy(false);
     }
   }, [cloudId, share, canUseLink, note.share_token, applyVisibility, copyLink, rotateAndCopy]);
+
+  const copyIntentHandled = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      copyIntentHandled.current = false;
+      return;
+    }
+    if (copyLinkOnOpen && !copyIntentHandled.current && share && !loading && canUseLink) {
+      copyIntentHandled.current = true;
+      void handleLinkButton();
+    }
+  }, [open, copyLinkOnOpen, share, loading, canUseLink, handleLinkButton]);
 
   const handleInvite = useCallback(async () => {
     if (!cloudId || !canInvite) return;
@@ -689,6 +724,7 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
               <div className="relative">
                 <div className="flex items-center gap-2">
                   <input
+                    dir="auto"
                     ref={emailInputRef}
                     type="text"
                     value={emailInput}
@@ -720,11 +756,17 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
 
                 {access &&
                   emailInput.trim() &&
-                  (searchingSuggestions || suggestions.length > 0) && (
-                    <div className="absolute z-20 top-9 left-0 right-[72px] max-h-44 overflow-y-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
+                  (searchingSuggestions || suggestions.length > 0 || suggestionsSettled) && (
+                    <div className="absolute z-20 top-9 start-0 end-[72px] max-h-44 overflow-y-auto rounded-lg border border-border bg-popover p-1 shadow-lg">
                       {searchingSuggestions && suggestions.length === 0 ? (
                         <div className="h-8 flex items-center justify-center">
-                          <Loader2 size={12} className="animate-spin text-foreground/40" />
+                          <Loader2 size={12} className="animate-spin text-foreground/45" />
+                        </div>
+                      ) : suggestions.length === 0 ? (
+                        <div className="h-8 flex items-center justify-center">
+                          <span className="text-xs text-foreground/45">
+                            {t("noteEditor.share.dialog.noResults")}
+                          </span>
                         </div>
                       ) : (
                         suggestions.map((principal) => (
@@ -732,7 +774,7 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
                             key={`${principal.type}:${principal.id ?? principal.email}`}
                             type="button"
                             onClick={() => void handlePrincipalGrant(principal)}
-                            className="flex items-center gap-2 w-full min-w-0 px-2 h-9 rounded-md text-left hover:bg-foreground/5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            className="flex items-center gap-2 w-full min-w-0 px-2 h-9 rounded-md text-start hover:bg-foreground/5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                           >
                             {principal.type === "team" ||
                             principal.type === "folder" ||
@@ -746,11 +788,14 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
                               />
                             )}
                             <span className="min-w-0 flex-1">
-                              <span className="block text-xs text-foreground truncate">
+                              <span dir="auto" className="block text-xs text-foreground truncate">
                                 {principal.name || principal.email}
                               </span>
                               {principal.name && principal.email && (
-                                <span className="block text-[11px] text-foreground/40 truncate">
+                                <span
+                                  dir="ltr"
+                                  className="block text-[11px] text-foreground/45 truncate"
+                                >
                                   {principal.email}
                                 </span>
                               )}
@@ -787,8 +832,9 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
                   secondary={
                     access?.owner.name ? access.owner.email : ownerName ? ownerEmail : null
                   }
+                  secondaryDir="ltr"
                   trailing={
-                    <span className="text-[11px] text-foreground/40">
+                    <span className="text-[11px] text-foreground/45">
                       {t("noteEditor.share.dialog.owner")}
                     </span>
                   }
@@ -828,7 +874,7 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
                     primary={space.name}
                     secondary={t("noteEditor.share.dialog.teamAudience")}
                     trailing={
-                      <span className="text-[11px] text-foreground/40">
+                      <span className="text-[11px] text-foreground/45">
                         {t("noteEditor.share.dialog.editor")}
                       </span>
                     }
@@ -840,6 +886,7 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
                   key={invitation.id}
                   leading={<MemberAvatar name={null} email={invitation.email} size="md" />}
                   primary={invitation.email}
+                  primaryDir="ltr"
                   secondary={
                     invitation.accepted_at
                       ? t("noteEditor.share.dialog.accepted")
@@ -881,7 +928,7 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
                         </DropdownMenuContent>
                       </DropdownMenu>
                     ) : (
-                      <span className="text-[11px] text-foreground/40">
+                      <span className="text-[11px] text-foreground/45">
                         {t("noteEditor.share.dialog.viewer")}
                       </span>
                     )
@@ -890,7 +937,7 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
               ))}
             </div>
 
-            <div className="flex items-center gap-2 pt-3 mt-1 border-t border-border/60">
+            <div className="flex items-center gap-2 pt-3 mt-1 border-t border-border/70">
               <ShareVisibilityMenu
                 value={share?.visibility ?? "private"}
                 ownerDomain={ownerDomain}
@@ -936,6 +983,30 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
             </div>
           </>
         )}
+
+        {exportOptions.length > 0 && (
+          <div className="mt-1 border-t border-border/70 pt-3">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-foreground/55">
+              {t("noteEditor.share.dialog.export")}
+            </p>
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {exportOptions.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={() => {
+                    option.onSelect();
+                    onOpenChange(false);
+                  }}
+                  className="flex items-center gap-2.5 rounded-xl border border-border/70 px-3 py-2.5 text-start text-xs font-medium text-foreground/80 transition-colors hover:bg-surface-3 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/30 dark:border-white/10 dark:hover:bg-surface-2"
+                >
+                  <FileText size={14} className="shrink-0 text-foreground/55" />
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );
@@ -944,17 +1015,32 @@ export default function ShareNoteDialog({ open, onOpenChange, note }: ShareNoteD
 interface MemberRowProps {
   leading?: React.ReactNode;
   primary: string;
+  primaryDir?: "auto" | "ltr";
   secondary: string | null;
+  secondaryDir?: "auto" | "ltr";
   trailing: React.ReactNode;
 }
 
-function MemberRow({ leading, primary, secondary, trailing }: MemberRowProps) {
+function MemberRow({
+  leading,
+  primary,
+  primaryDir = "auto",
+  secondary,
+  secondaryDir = "auto",
+  trailing,
+}: MemberRowProps) {
   return (
     <div className="flex items-center gap-2 py-1.5 px-1">
       {leading}
       <div className="flex-1 min-w-0">
-        <p className="text-xs text-foreground truncate">{primary}</p>
-        {secondary && <p className="text-[11px] text-foreground/40 truncate">{secondary}</p>}
+        <p dir={primaryDir} className="text-xs text-foreground truncate">
+          {primary}
+        </p>
+        {secondary && (
+          <p dir={secondaryDir} className="text-[11px] text-foreground/45 truncate">
+            {secondary}
+          </p>
+        )}
       </div>
       {trailing}
     </div>
@@ -1020,6 +1106,11 @@ function AccessGrantRow({
       }
       primary={primary}
       secondary={secondary}
+      secondaryDir={
+        !grant.pending && principal.type !== "team" && principal.name && principal.email
+          ? "ltr"
+          : "auto"
+      }
       trailing={
         canChangePermission || canRemove ? (
           <DropdownMenu>
@@ -1070,7 +1161,7 @@ function AccessGrantRow({
             </DropdownMenuContent>
           </DropdownMenu>
         ) : (
-          <span className="text-[11px] text-foreground/40">{permissionLabel}</span>
+          <span className="text-[11px] text-foreground/45">{permissionLabel}</span>
         )
       }
     />

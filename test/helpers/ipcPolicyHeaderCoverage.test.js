@@ -15,7 +15,6 @@ const helperSources = fs
   }));
 
 const NON_POLICY_ROUTE_REASONS = new Map([
-  ["streaming-usage", "usage accounting does not perform a policy-gated action"],
   ["usage", "entitlement and recovery status must remain available"],
   ["stripe/switch-plan", "billing recovery must remain available"],
   ["stripe/preview-switch", "billing recovery must remain available"],
@@ -101,7 +100,7 @@ test("every direct OpenWhispr API route is policy-protected or explicitly exempt
 });
 
 test("policy headers are not injected into BYOK or self-hosted transports", () => {
-  for (const anchor of ['provider === "tinfoil"', 'kind === "self-hosted"']) {
+  for (const anchor of ['provider === "tinfoil"', 'provider === "self-hosted"']) {
     const anchorIndex = source.indexOf(anchor);
     assert.notEqual(anchorIndex, -1, `anchor ${anchor} must exist in ipcHandlers.js`);
     assert.doesNotMatch(source.slice(anchorIndex, anchorIndex + 1200), /withPolicyHeaders/);

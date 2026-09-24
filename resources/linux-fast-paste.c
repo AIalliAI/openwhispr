@@ -7,7 +7,9 @@
 #include <X11/Xatom.h>
 #include <X11/Xutil.h>
 #include <X11/extensions/XTest.h>
+#include <X11/extensions/shape.h>
 #include <X11/keysym.h>
+#include <math.h>
 #include <unistd.h>
 
 #ifdef HAVE_UINPUT
@@ -39,13 +41,12 @@ typedef enum {
 #define PORTAL_IFACE "org.freedesktop.portal.RemoteDesktop"
 #define REQUEST_IFACE "org.freedesktop.portal.Request"
 
-/* evdev keycodes for portal mode */
-#define PORTAL_KEY_LEFTCTRL  29
-#define PORTAL_KEY_LEFTSHIFT 42
-#define PORTAL_KEY_C         46
-#define PORTAL_KEY_V         47
-#define PORTAL_KEY_INSERT    110
-
+/* Method replies are immediate on a healthy portal (user interaction arrives via
+ * Response signals, not the call reply). A stale RemoteDesktop session can leave
+ * a sync call hanging inside a signal callback, which blocks the main loop and
+ * defeats the 10s watchdog below — so bound every call instead of using the
+ * default (25s) D-Bus timeout. */
+#define PORTAL_CALL_TIMEOUT_MS 3000
 static int portal_exit_code = 0;
 
 typedef struct {
@@ -77,54 +78,62 @@ static guint subscribe_response(PortalData *app, const char *request_path,
         callback, app, NULL);
 }
 
-static void portal_emit_key(PortalData *app, gint32 keycode, guint32 pressed,
-                            const char *label)
+static int portal_emit_keysym(PortalData *app, gint32 keysym, guint32 pressed,
+                              const char *label)
 {
     GError *err = NULL;
     GVariant *opts = g_variant_new("a{sv}", NULL);
-    g_dbus_connection_call_sync(app->conn, PORTAL_BUS, PORTAL_PATH,
-        PORTAL_IFACE, "NotifyKeyboardKeycode",
-        g_variant_new("(o@a{sv}iu)", app->session_handle, opts, keycode, pressed),
-        NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &err);
-    if (err) { fprintf(stderr, "%s: %s\n", label, err->message); g_clear_error(&err); }
+    GVariant *result = g_dbus_connection_call_sync(app->conn, PORTAL_BUS, PORTAL_PATH,
+        PORTAL_IFACE, "NotifyKeyboardKeysym",
+        g_variant_new("(o@a{sv}iu)", app->session_handle, opts, keysym, pressed),
+        NULL, G_DBUS_CALL_FLAGS_NONE, PORTAL_CALL_TIMEOUT_MS, NULL, &err);
+    if (err) {
+        fprintf(stderr, "%s: %s\n", label, err->message);
+        g_clear_error(&err);
+        return 0;
+    }
+    if (result) g_variant_unref(result);
+    return 1;
 }
 
 static void portal_send_paste(PortalData *app)
 {
+    int ok = 1;
     if (app->copy_mode) {
         const int use_shift = (app->mode == PASTE_MODE_CTRL_SHIFT_V);
-        portal_emit_key(app, PORTAL_KEY_LEFTCTRL, 1, "Ctrl press");
+        ok &= portal_emit_keysym(app, XK_Control_L, 1, "Ctrl press");
         if (use_shift)
-            portal_emit_key(app, PORTAL_KEY_LEFTSHIFT, 1, "Shift press");
-        portal_emit_key(app, PORTAL_KEY_C, 1, "C press");
+            ok &= portal_emit_keysym(app, XK_Shift_L, 1, "Shift press");
+        ok &= portal_emit_keysym(app, XK_c, 1, "C press");
         usleep(20000);
-        portal_emit_key(app, PORTAL_KEY_C, 0, "C release");
+        ok &= portal_emit_keysym(app, XK_c, 0, "C release");
         if (use_shift)
-            portal_emit_key(app, PORTAL_KEY_LEFTSHIFT, 0, "Shift release");
-        portal_emit_key(app, PORTAL_KEY_LEFTCTRL, 0, "Ctrl release");
+            ok &= portal_emit_keysym(app, XK_Shift_L, 0, "Shift release");
+        ok &= portal_emit_keysym(app, XK_Control_L, 0, "Ctrl release");
     } else if (app->mode == PASTE_MODE_SHIFT_INSERT) {
-        portal_emit_key(app, PORTAL_KEY_LEFTSHIFT, 1, "Shift press");
+        ok &= portal_emit_keysym(app, XK_Shift_L, 1, "Shift press");
         /* let the compositor register the modifier before the key arrives */
         usleep(20000);
-        portal_emit_key(app, PORTAL_KEY_INSERT,    1, "Insert press");
+        ok &= portal_emit_keysym(app, XK_Insert, 1, "Insert press");
         usleep(20000);
-        portal_emit_key(app, PORTAL_KEY_INSERT,    0, "Insert release");
-        portal_emit_key(app, PORTAL_KEY_LEFTSHIFT, 0, "Shift release");
+        ok &= portal_emit_keysym(app, XK_Insert, 0, "Insert release");
+        ok &= portal_emit_keysym(app, XK_Shift_L, 0, "Shift release");
     } else {
         const int use_shift = (app->mode == PASTE_MODE_CTRL_SHIFT_V);
 
-        portal_emit_key(app, PORTAL_KEY_LEFTCTRL, 1, "Ctrl press");
+        ok &= portal_emit_keysym(app, XK_Control_L, 1, "Ctrl press");
         if (use_shift)
-            portal_emit_key(app, PORTAL_KEY_LEFTSHIFT, 1, "Shift press");
+            ok &= portal_emit_keysym(app, XK_Shift_L, 1, "Shift press");
         usleep(20000);
-        portal_emit_key(app, PORTAL_KEY_V, 1, "V press");
+        ok &= portal_emit_keysym(app, XK_v, 1, "V press");
         usleep(20000);
-        portal_emit_key(app, PORTAL_KEY_V, 0, "V release");
+        ok &= portal_emit_keysym(app, XK_v, 0, "V release");
         if (use_shift)
-            portal_emit_key(app, PORTAL_KEY_LEFTSHIFT, 0, "Shift release");
-        portal_emit_key(app, PORTAL_KEY_LEFTCTRL, 0, "Ctrl release");
+            ok &= portal_emit_keysym(app, XK_Shift_L, 0, "Shift release");
+        ok &= portal_emit_keysym(app, XK_Control_L, 0, "Ctrl release");
     }
 
+    if (!ok) portal_exit_code = 6;
     g_main_loop_quit(app->loop);
 }
 
@@ -196,7 +205,7 @@ static void on_select_devices_response(GDBusConnection *conn, const char *sender
         PORTAL_IFACE, "Start",
         g_variant_new("(os@a{sv})", app->session_handle, "",
                        g_variant_builder_end(&opts)),
-        NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &err);
+        NULL, G_DBUS_CALL_FLAGS_NONE, PORTAL_CALL_TIMEOUT_MS, NULL, &err);
 
     g_free(request_path);
     if (err) {
@@ -260,7 +269,7 @@ static void on_create_session_response(GDBusConnection *conn, const char *sender
         PORTAL_IFACE, "SelectDevices",
         g_variant_new("(o@a{sv})", app->session_handle,
                        g_variant_builder_end(&opts)),
-        NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &err);
+        NULL, G_DBUS_CALL_FLAGS_NONE, PORTAL_CALL_TIMEOUT_MS, NULL, &err);
 
     g_free(request_path);
     if (err) {
@@ -318,7 +327,7 @@ static int paste_via_portal(paste_mode_t mode, const char *restore_token, int co
     g_dbus_connection_call_sync(app.conn, PORTAL_BUS, PORTAL_PATH,
         PORTAL_IFACE, "CreateSession",
         g_variant_new("(@a{sv})", g_variant_builder_end(&opts)),
-        NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, &err);
+        NULL, G_DBUS_CALL_FLAGS_NONE, PORTAL_CALL_TIMEOUT_MS, NULL, &err);
 
     g_free(request_path);
     if (err) {
@@ -345,7 +354,8 @@ static const char *terminal_classes[] = {
     "konsole", "gnome-terminal", "terminal", "kitty", "alacritty",
     "terminator", "xterm", "urxvt", "rxvt", "tilix", "terminology",
     "wezterm", "foot", "st", "yakuake", "ghostty", "guake", "tilda",
-    "hyper", "tabby", "sakura", "warp", "termius", "waveterm", NULL
+    "hyper", "tabby", "sakura", "warp", "termius", "waveterm",
+    "ptyxis", "kgx", "org.gnome.console", NULL
 };
 
 static int is_terminal(const char *wm_class) {
@@ -776,6 +786,63 @@ static paste_mode_t resolve_paste_mode(int force_terminal, int force_shift_inser
     return is_term ? PASTE_MODE_CTRL_SHIFT_V : PASTE_MODE_CTRL_V;
 }
 
+/* Shape only input, leaving transparent shadows/tooltips free to render.
+ * Keeping the visible pill in the compositor's input region also works over
+ * native Wayland apps, where XWayland cannot query a fresh global cursor. */
+static int serve_input_region(Window window)
+{
+    if (window == None) return 1;
+    Display *display = XOpenDisplay(NULL);
+    if (!display) return 1;
+    int event_base, error_base, major, minor;
+    if (!XShapeQueryExtension(display, &event_base, &error_base) ||
+        !XShapeQueryVersion(display, &major, &minor) ||
+        (major == 1 && minor < 1)) {
+        XCloseDisplay(display);
+        return 1;
+    }
+
+    char request[512];
+    while (fgets(request, sizeof(request), stdin)) {
+        if (strcmp(request, "full\n") == 0) {
+            XShapeCombineMask(display, window, ShapeInput, 0, 0, None, ShapeSet);
+        } else {
+            double viewport_width, viewport_height, x, y, width, height;
+            if (sscanf(request, "%lf %lf %lf %lf %lf %lf", &viewport_width,
+                       &viewport_height, &x, &y, &width, &height) != 6 ||
+                !isfinite(viewport_width) || !isfinite(viewport_height) ||
+                !isfinite(x) || !isfinite(y) || !isfinite(width) || !isfinite(height) ||
+                viewport_width <= 0 || viewport_height <= 0 || width < 0 || height < 0) {
+                XCloseDisplay(display);
+                return 1;
+            }
+            Window root;
+            int window_x, window_y;
+            unsigned int native_width, native_height, border, depth;
+            if (!XGetGeometry(display, window, &root, &window_x, &window_y,
+                              &native_width, &native_height, &border, &depth)) {
+                XCloseDisplay(display);
+                return 1;
+            }
+            int left = (int)floor(fmax(0, fmin(native_width, x * native_width / viewport_width)));
+            int top = (int)floor(fmax(0, fmin(native_height, y * native_height / viewport_height)));
+            int right = (int)ceil(fmax(0, fmin(native_width, (x + width) * native_width / viewport_width)));
+            int bottom = (int)ceil(fmax(0, fmin(native_height, (y + height) * native_height / viewport_height)));
+            XRectangle rectangle = { left, top, right - left, bottom - top };
+            int count = width > 0 && height > 0 && right > left && bottom > top ? 1 : 0;
+            XShapeCombineRectangles(display, window, ShapeInput, 0, 0,
+                                    &rectangle, count, ShapeSet, Unsorted);
+        }
+        /* Acknowledging after the server applies the shape orders panel capture
+         * after any older pill-only requests from a replaced React effect. */
+        XSync(display, False);
+        printf("OK\n");
+        fflush(stdout);
+    }
+    XCloseDisplay(display);
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     int force_terminal = 0;
     int force_shift_insert = 0;
@@ -784,6 +851,7 @@ int main(int argc, char *argv[]) {
     int media_play_pause = 0;
     int copy_mode = 0;
     int capabilities_only = 0;
+    int input_region_server = 0;
     int atspi_target_only = 0;
     int atspi_selection = 0;
     const char *restore_token = NULL;
@@ -804,6 +872,8 @@ int main(int argc, char *argv[]) {
             copy_mode = 1;
         } else if (strcmp(argv[i], "--capabilities") == 0) {
             capabilities_only = 1;
+        } else if (strcmp(argv[i], "--input-region-server") == 0) {
+            input_region_server = 1;
         } else if (strcmp(argv[i], "--atspi-target") == 0) {
             atspi_target_only = 1;
         } else if (strcmp(argv[i], "--atspi-selection") == 0) {
@@ -815,8 +885,15 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    /* --capabilities makes older binaries exit harmlessly instead of pasting
+     * when they encounter the new server flag. */
+    if (input_region_server) return serve_input_region(target_window);
+
     if (capabilities_only) {
         printf("paste-v1 selection-copy-v1 target-window-v1");
+#ifdef HAVE_GIO
+        printf(" portal-keysym-v1");
+#endif
 #ifdef HAVE_ATSPI
         printf(" atspi-selection-v1");
 #endif

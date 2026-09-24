@@ -2,9 +2,19 @@ const { net } = require("electron");
 const debugLogger = require("./debugLogger");
 const GoogleCalendarOAuth = require("./googleCalendarOAuth");
 const CalendarSyncInterval = require("./calendarSyncInterval");
+const { MAX_BUFFER_MINUTES } = require("./calendarAvailability");
+const { extractMeetingUrl } = require("./meetingJoinUrl");
 const { broadcastToWindows } = require("./windowBroadcast");
 
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
+const BUFFER_COVERAGE_MS = MAX_BUFFER_MINUTES * 60 * 1000;
+const ALL_DAY_TIMEZONE_PADDING_MS = 48 * 60 * 60 * 1000;
+
+// Sync tokens pin the full sync's timeMin/timeMax window, so discard them
+// after a day to keep the lookahead covering the 31-day availability horizon.
+const SYNC_LOOKAHEAD_MS = 33 * 24 * 60 * 60 * 1000;
+const SYNC_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const GOOGLE_RESPONSE_STATUSES = new Set(["accepted", "declined", "tentative", "needsAction"]);
 
 class GoogleCalendarManager {
   constructor(databaseManager, windowManager, reminderScheduler) {
@@ -156,56 +166,80 @@ class GoogleCalendarManager {
 
   async _syncCalendar(calendar) {
     const accountEmail = calendar.account_email;
-    const params = new URLSearchParams({
-      singleEvents: "true",
-      orderBy: "startTime",
-      timeMin: new Date().toISOString(),
-      timeMax: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-    });
 
-    if (calendar.sync_token) {
-      params.delete("timeMin");
-      params.delete("timeMax");
-      params.delete("orderBy");
-      params.set("syncToken", calendar.sync_token);
-    }
+    const buildFullParams = () =>
+      new URLSearchParams({
+        singleEvents: "true",
+        orderBy: "startTime",
+        timeMin: new Date(
+          Date.now() - BUFFER_COVERAGE_MS - ALL_DAY_TIMEZONE_PADDING_MS
+        ).toISOString(),
+        timeMax: new Date(
+          Date.now() + SYNC_LOOKAHEAD_MS + ALL_DAY_TIMEZONE_PADDING_MS
+        ).toISOString(),
+      });
 
-    let isFullSync = !calendar.sync_token;
-    let data;
-    try {
-      data = await this._apiGet(
-        `/calendars/${encodeURIComponent(calendar.id)}/events?${params.toString()}`,
-        accountEmail
-      );
-    } catch (err) {
-      // 410 Gone means syncToken is invalid; fall back to full sync
-      if (err.statusCode === 410) {
-        isFullSync = true;
-        const fullParams = new URLSearchParams({
+    const hasFreshToken = Boolean(
+      calendar.sync_token && calendar.sync_token_expires_at > Date.now()
+    );
+    let isFullSync = !hasFreshToken;
+    let tokenExpiresAt = hasFreshToken
+      ? calendar.sync_token_expires_at
+      : Date.now() + SYNC_TOKEN_TTL_MS;
+    let baseParams = isFullSync
+      ? buildFullParams()
+      : new URLSearchParams({
           singleEvents: "true",
-          orderBy: "startTime",
-          timeMin: new Date().toISOString(),
-          timeMax: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          syncToken: calendar.sync_token,
         });
+    let pageToken = null;
+    let nextSyncToken = null;
+    const allItems = [];
+
+    while (true) {
+      const params = new URLSearchParams(baseParams);
+      if (pageToken) params.set("pageToken", pageToken);
+
+      let data;
+      try {
         data = await this._apiGet(
-          `/calendars/${encodeURIComponent(calendar.id)}/events?${fullParams.toString()}`,
+          `/calendars/${encodeURIComponent(calendar.id)}/events?${params.toString()}`,
           accountEmail
         );
-      } else {
+      } catch (err) {
+        // 410 Gone means syncToken is invalid; fall back to full sync
+        if (err.statusCode === 410 && !pageToken && !isFullSync) {
+          isFullSync = true;
+          tokenExpiresAt = Date.now() + SYNC_TOKEN_TTL_MS;
+          baseParams = buildFullParams();
+          continue;
+        }
         throw err;
       }
+
+      if (data.items) {
+        allItems.push(...data.items);
+      }
+      pageToken = data.nextPageToken || null;
+      if (data.nextSyncToken) {
+        nextSyncToken = data.nextSyncToken;
+      }
+
+      if (!pageToken) break;
     }
 
     const toUpsert = [];
     const toRemove = [];
+    const contactsToUpsert = [];
 
-    for (const item of data.items || []) {
+    for (const item of allItems) {
       if (item.status === "cancelled") {
         toRemove.push(item.id);
         continue;
       }
 
       const isAllDay = !item.start?.dateTime;
+      const selfAttendee = item.attendees?.find((attendee) => attendee.self === true);
       toUpsert.push({
         id: item.id,
         calendar_id: calendar.id,
@@ -215,7 +249,11 @@ class GoogleCalendarManager {
         end_time: item.end?.dateTime || item.end?.date,
         is_all_day: isAllDay,
         status: item.status || "confirmed",
-        hangout_link: item.hangoutLink || null,
+        availability_status: item.transparency === "transparent" ? "free" : "busy",
+        self_response_status: GOOGLE_RESPONSE_STATUSES.has(selfAttendee?.responseStatus)
+          ? selfAttendee.responseStatus
+          : "unknown",
+        hangout_link: item.hangoutLink || extractMeetingUrl([item.location, item.description]),
         conference_data: item.conferenceData ? JSON.stringify(item.conferenceData) : null,
         organizer_email: item.organizer?.email || null,
         attendees_count: item.attendees?.length || 0,
@@ -230,6 +268,13 @@ class GoogleCalendarManager {
             )
           : null,
       });
+
+      if (item.attendees) {
+        for (const a of item.attendees) {
+          if (a.email)
+            contactsToUpsert.push({ email: a.email, displayName: a.displayName || null });
+        }
+      }
     }
 
     // A full sync has no incremental baseline, so deletions that happened
@@ -244,17 +289,8 @@ class GoogleCalendarManager {
     }
     if (toUpsert.length > 0) this.databaseManager.upsertCalendarEvents(toUpsert);
     if (toRemove.length > 0) this.databaseManager.removeCalendarEvents(toRemove);
-    if (data.nextSyncToken)
-      this.databaseManager.updateCalendarSyncToken(calendar.id, data.nextSyncToken);
-
-    const contactsToUpsert = [];
-    for (const item of data.items || []) {
-      if (item.attendees) {
-        for (const a of item.attendees) {
-          if (a.email)
-            contactsToUpsert.push({ email: a.email, displayName: a.displayName || null });
-        }
-      }
+    if (nextSyncToken) {
+      this.databaseManager.updateCalendarSyncToken(calendar.id, nextSyncToken, tokenExpiresAt);
     }
     if (contactsToUpsert.length > 0) this.databaseManager.upsertContacts(contactsToUpsert);
   }
@@ -325,16 +361,20 @@ class GoogleCalendarManager {
       useSessionCookies: false,
     });
     const text = await response.text();
-    let parsed;
+    let parsed = null;
     try {
       parsed = JSON.parse(text);
     } catch {
-      throw new Error(`Invalid JSON response: ${text.slice(0, 200)}`);
+      // Error statuses can arrive with empty or non-JSON bodies; surface the
+      // status below instead of masking it as a parse failure.
     }
     if (response.status >= 400) {
-      const err = new Error(parsed.error?.message || `API error ${response.status}`);
+      const err = new Error(parsed?.error?.message || `API error ${response.status}`);
       err.statusCode = response.status;
       throw err;
+    }
+    if (parsed === null) {
+      throw new Error(`Invalid JSON response: ${text.slice(0, 200)}`);
     }
     return parsed;
   }

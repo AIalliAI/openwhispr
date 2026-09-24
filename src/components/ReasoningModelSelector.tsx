@@ -8,18 +8,20 @@ import type {
   InferenceMode,
 } from "../types/electron";
 import { Button } from "./ui/button";
-import { Cloud, Lock, Zap } from "lucide-react";
+import { CircleAlert, Cloud, Lock, Zap } from "./icons";
 import ApiKeyInput from "./ui/ApiKeyInput";
 import ModelCardList from "./ui/ModelCardList";
 import LocalModelPicker, { type LocalProvider } from "./LocalModelPicker";
 import { ProviderTabs, type ProviderTabItem } from "./ui/ProviderTabs";
 import OpenAICompatiblePanel from "./OpenAICompatiblePanel";
 import { API_ENDPOINTS } from "../config/constants";
-import logger from "../utils/logger";
-import { REASONING_PROVIDERS, toReasoningModel } from "../models/ModelRegistry";
+import {
+  REASONING_PROVIDERS,
+  toReasoningModel,
+  modelRegistry,
+  isProviderValidForMode,
+} from "../models/ModelRegistry";
 import { useTinfoilModels } from "../hooks/useTinfoilModels";
-import { pickDefaultTinfoilModel } from "../models/tinfoilModels";
-import { modelRegistry } from "../models/ModelRegistry";
 import { getRemoteProviderIcon } from "../utils/providerIcons";
 import { GetApiKeyLink } from "./ui/GetApiKeyLink";
 import { getCachedPlatform } from "../utils/platform";
@@ -218,7 +220,7 @@ function GpuStatusBadge() {
         <button
           type="button"
           onClick={() => setError(null)}
-          className="text-xs text-muted-foreground hover:text-foreground transition-colors ml-1"
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors ms-1"
         >
           {t("gpu.dismiss")}
         </button>
@@ -243,23 +245,33 @@ function GpuStatusBadge() {
     // State 6: Activation failed
     if (!isGpu && activationFailed) {
       return (
-        <div className="flex items-center gap-1.5 mt-2 px-1">
-          <span className="inline-block w-1.5 h-1.5 rounded-full shrink-0 bg-warning" />
-          <span className="text-xs text-muted-foreground">{t("gpu.activationFailed")}</span>
-          <button
-            type="button"
-            onClick={handleRetry}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors ml-1"
-          >
-            {t("gpu.retry")}
-          </button>
-          <button
+        <div className="mt-2 flex items-start justify-between gap-3 rounded-md border border-warning/40 bg-warning/5 p-2.5">
+          <div className="flex min-w-0 items-start gap-2">
+            <CircleAlert size={15} className="mt-0.5 shrink-0 text-warning" />
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-foreground">{t("gpu.activationFailed")}</p>
+              <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
+                {t("gpu.reasoningActivationFailedDescription")}
+              </p>
+              <Button
+                type="button"
+                onClick={handleRetry}
+                size="sm"
+                className="mt-2 h-7 px-3 text-xs"
+              >
+                {t("gpu.retryActivation")}
+              </Button>
+            </div>
+          </div>
+          <Button
             type="button"
             onClick={handleDelete}
-            className="text-xs text-muted-foreground hover:text-foreground transition-colors ml-auto"
+            size="sm"
+            variant="ghost"
+            className="h-6 shrink-0 px-2 text-xs text-muted-foreground hover:text-destructive"
           >
             {t("gpu.remove")}
-          </button>
+          </Button>
         </div>
       );
     }
@@ -276,7 +288,7 @@ function GpuStatusBadge() {
         <button
           type="button"
           onClick={handleDelete}
-          className="text-xs text-muted-foreground hover:text-foreground transition-colors ml-auto"
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors ms-auto"
         >
           {t("gpu.remove")}
         </button>
@@ -458,110 +470,44 @@ export default function ReasoningModelSelector({
     }
   }, [localProviders, localReasoningProvider]);
 
-  const loadDownloadedModels = useCallback(async () => {
-    try {
-      const result = await window.electronAPI?.modelGetAll?.();
-      if (result && Array.isArray(result)) {
-        const downloaded = new Set(
-          result
-            .filter((m: { isDownloaded?: boolean }) => m.isDownloaded)
-            .map((m: { id: string }) => m.id)
-        );
-        return downloaded;
-      }
-    } catch (error) {
-      logger.error("Failed to load downloaded models", { error }, "models");
+  // A selection commits only on an explicit click: the model together with
+  // the provider tab it was clicked under. Tab switching is pure browsing.
+  // Local models resolve their provider from the registry so an async select
+  // (e.g. a download finishing while another tab is browsed) can never commit
+  // a mismatched (provider, model) pair.
+  const handleModelSelect = (modelId: string) => {
+    if (!modelId) {
+      setReasoningModel("");
+      return;
     }
-    return new Set<string>();
-  }, []);
+    const provider =
+      effectiveMode === "local"
+        ? (modelRegistry.getModel(modelId)?.provider.id ?? selectedLocalProvider)
+        : displayedCloudProvider;
+    setLocalReasoningProvider(provider);
+    setReasoningModel(modelId);
+  };
 
-  const selectDefaultModelForProvider = useCallback(
-    (provider: string) => {
-      // Custom/OpenRouter fetch their model list dynamically — clear instead of
-      // presetting so another provider's model id can't persist under this one.
-      if (provider === "custom" || provider === OPENROUTER_TAB) {
-        setReasoningModel("");
-        return;
-      }
-
-      if (provider === "tinfoil") {
-        const defaultModel = pickDefaultTinfoilModel(tinfoilModels);
-        if (defaultModel) setReasoningModel(defaultModel.id);
-        return;
-      }
-
-      const providerData = REASONING_PROVIDERS[provider as keyof typeof REASONING_PROVIDERS];
-      if (providerData?.models?.length > 0) {
-        setReasoningModel(providerData.models[0].value);
-      }
-    },
-    [setReasoningModel, tinfoilModels]
-  );
-
-  const handleModeChange = async (newMode: "cloud" | "local") => {
+  const handleModeChange = (newMode: "cloud" | "local") => {
     const policyMode = newMode === "local" ? "local" : "providers";
     if (!isModeAllowedByPolicy(policyState, "llm", policyMode)) return;
     if (newMode === "cloud" && cloudProviders.length === 0) return;
     setSelectedMode(newMode);
-    setReasoningModeProp?.(newMode === "local" ? "local" : "providers");
-
-    if (newMode === "cloud") {
-      window.electronAPI?.llamaServerStop?.();
-      // The remembered cloud provider may have become policy-disallowed while
-      // the user was in local mode — fall back to the first allowed one.
-      const nextProvider = providerAllowed(displayedCloudProvider)
-        ? displayedCloudProvider
-        : cloudProviders[0]?.id;
-      if (!nextProvider) return;
-      if (nextProvider !== displayedCloudProvider) setSelectedCloudProvider(nextProvider);
-      setLocalReasoningProvider(nextProvider);
-      selectDefaultModelForProvider(nextProvider);
-    } else {
-      setLocalReasoningProvider(selectedLocalProvider);
-      const downloaded = await loadDownloadedModels();
-      const provider = localProviders.find((p) => p.id === selectedLocalProvider);
-      const models = provider?.models ?? [];
-      if (models.length > 0) {
-        const firstDownloaded = models.find((m) => downloaded.has(m.id));
-        if (firstDownloaded) {
-          setReasoningModel(firstDownloaded.id);
-        } else {
-          setReasoningModel("");
-        }
-      }
+    const inferenceMode: InferenceMode = newMode === "local" ? "local" : "providers";
+    setReasoningModeProp?.(inferenceMode);
+    if (!isProviderValidForMode(localReasoningProvider, inferenceMode)) {
+      setLocalReasoningProvider("");
+      setReasoningModel("");
     }
   };
 
-  const handleCloudProviderChange = useCallback(
-    (provider: string) => {
-      if (!providerAllowed(provider)) return;
-      setSelectedCloudProvider(provider);
-      setLocalReasoningProvider(provider);
-      selectDefaultModelForProvider(provider);
-    },
-    [providerAllowed, selectDefaultModelForProvider, setLocalReasoningProvider]
-  );
+  const handleCloudProviderChange = (provider: string) => {
+    if (!providerAllowed(provider)) return;
+    setSelectedCloudProvider(provider);
+  };
 
-  const handleLocalProviderChange = async (providerId: string) => {
+  const handleLocalProviderChange = (providerId: string) => {
     setSelectedLocalProvider(providerId);
-    setLocalReasoningProvider(providerId);
-    const downloaded = await loadDownloadedModels();
-    const provider = localProviders.find((p) => p.id === providerId);
-    const models = provider?.models ?? [];
-    if (models.length > 0) {
-      const firstDownloaded = models.find((m) => downloaded.has(m.id));
-      if (firstDownloaded) {
-        setReasoningModel(firstDownloaded.id);
-      } else {
-        setReasoningModel("");
-      }
-    }
-  };
-
-  const handleLocalModelSelect = (modelId: string) => {
-    const providerId = modelId ? modelRegistry.getModel(modelId)?.provider.id : undefined;
-    if (providerId) setLocalReasoningProvider(providerId);
-    setReasoningModel(modelId);
   };
 
   const renderModeIcon = (id: string) => {
@@ -608,6 +554,8 @@ export default function ReasoningModelSelector({
 
           {providerAllowed(displayedCloudProvider) && (
             <div>
+              {/* A model renders as selected only under its committed provider —
+                free-form custom/OpenRouter ids can collide with registry ids. */}
               {displayedCloudProvider === OPENROUTER_TAB ? (
                 <OpenAICompatiblePanel
                   key={OPENROUTER_TAB}
@@ -615,8 +563,11 @@ export default function ReasoningModelSelector({
                   setBaseUrl={() => {}}
                   apiKey={openrouterApiKey}
                   setApiKey={setOpenrouterApiKey}
-                  model={reasoningModel}
-                  setModel={setReasoningModel}
+                  model={localReasoningProvider === OPENROUTER_TAB ? reasoningModel : ""}
+                  setModel={(m) => {
+                    setLocalReasoningProvider(OPENROUTER_TAB);
+                    setReasoningModel(m);
+                  }}
                   lockedBaseUrl
                   apiKeyRequired
                   getKeyUrl={OPENROUTER_KEYS_URL}
@@ -628,8 +579,11 @@ export default function ReasoningModelSelector({
                   setBaseUrl={setCloudReasoningBaseUrl}
                   apiKey={customReasoningApiKey}
                   setApiKey={setCustomReasoningApiKey || (() => {})}
-                  model={reasoningModel}
-                  setModel={setReasoningModel}
+                  model={localReasoningProvider === "custom" ? reasoningModel : ""}
+                  setModel={(m) => {
+                    setLocalReasoningProvider("custom");
+                    setReasoningModel(m);
+                  }}
                   defaultBaseUrl={API_ENDPOINTS.OPENAI_BASE}
                 />
               ) : (
@@ -731,8 +685,10 @@ export default function ReasoningModelSelector({
                     </h4>
                     <ModelCardList
                       models={selectedCloudModels}
-                      selectedModel={reasoningModel}
-                      onModelSelect={setReasoningModel}
+                      selectedModel={
+                        localReasoningProvider === displayedCloudProvider ? reasoningModel : ""
+                      }
+                      onModelSelect={handleModelSelect}
                     />
                     {displayedCloudProvider === "tinfoil" && (
                       <>
@@ -762,7 +718,7 @@ export default function ReasoningModelSelector({
             providers={localProviders}
             selectedModel={reasoningModel}
             selectedProvider={selectedLocalProvider}
-            onModelSelect={handleLocalModelSelect}
+            onModelSelect={handleModelSelect}
             onProviderSelect={handleLocalProviderChange}
             modelType="llm"
             colorScheme="purple"
