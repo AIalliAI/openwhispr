@@ -72,6 +72,7 @@ export interface NoteRecordingProvider {
 // renderers (#1624).
 export interface DictationRealtimeSessionOptions {
   provider: string;
+  baseUrl?: string;
   model?: string;
   mode?: "byok" | "openwhispr";
   language?: string;
@@ -80,6 +81,12 @@ export interface DictationRealtimeSessionOptions {
   environment?: string;
   tenant?: string;
   preview?: boolean;
+}
+
+export interface DictationLanguageMetadata {
+  language: string | null;
+  languageConfidence: number | null;
+  languageAudioSeconds?: number;
 }
 
 export type NoteRecordingConfigFailure = { success: false } & PolicyFailureMetadata;
@@ -2355,6 +2362,8 @@ declare global {
           diarization?: boolean;
           localDate?: string;
           analyticsOccurredAt?: string;
+          // Why a managed-streaming user's dictation went batch (rollout metric).
+          streamingFallbackReason?: string;
         }
       ) => Promise<
         {
@@ -2382,6 +2391,7 @@ declare global {
           screenContext?: ScreenContextImage;
           language?: string;
           locale?: string;
+          streamingFallbackReason?: string;
         }
       ) => Promise<{
         success: boolean;
@@ -3095,9 +3105,19 @@ declare global {
         options: DictationRealtimeSessionOptions
       ) => Promise<{ success: boolean } & PolicyFailureMetadata>;
       dictationRealtimeSend?: (buffer: ArrayBuffer) => void;
+      dictationRealtimeFinalize?: () => Promise<
+        {
+          success: boolean;
+          text?: string;
+          error?: string;
+        } & Partial<DictationLanguageMetadata>
+      >;
       dictationRealtimeStop?: () => Promise<{ success: boolean; text: string }>;
       onDictationRealtimePartial?: (callback: (text: string) => void) => () => void;
       onDictationRealtimeFinal?: (callback: (text: string) => void) => () => void;
+      onDictationRealtimeLanguage?: (
+        callback: (metadata: DictationLanguageMetadata) => void
+      ) => () => void;
       onDictationRealtimeError?: (callback: (error: string) => void) => () => void;
       onDictationRealtimeSessionEnd?: (callback: (data: { text: string }) => void) => () => void;
 

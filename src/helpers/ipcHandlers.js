@@ -1,3 +1,5 @@
+const { OrukeetStreaming } = require("./orukeetStreaming");
+const { connectManagedOrukeet } = require("./orukeetCloudSession");
 const { ipcMain, app, shell, BrowserWindow, systemPreferences, net, session } = require("electron");
 const path = require("path");
 const fs = require("fs");
@@ -6241,6 +6243,7 @@ class IPCHandlers {
           clientTranscriptionId,
           localDate: opts.localDate,
           analyticsOccurredAt: opts.analyticsOccurredAt,
+          streamingFallbackReason: opts.streamingFallbackReason,
         };
 
         debugLogger.debug("Cloud transcribe request", { audioSize: audioData.length }, "cloud-api");
@@ -8351,14 +8354,31 @@ class IPCHandlers {
     };
 
     const setupDictationCallbacks = (streaming, event) => {
+      const isOrukeet = streaming instanceof OrukeetStreaming;
+      const canNotify = () =>
+        !isOrukeet || (this._dictationStreaming === streaming && !event.sender.isDestroyed?.());
+      if (isOrukeet) {
+        const ownerGone = () => {
+          streaming.disconnect().catch(() => {});
+          if (this._dictationStreaming === streaming) this._dictationStreaming = null;
+        };
+        event.sender.once?.("destroyed", ownerGone);
+        streaming.onClose = () => event.sender.removeListener?.("destroyed", ownerGone);
+      }
       streaming.onPartialTranscript = (text) => {
         event.sender.send("dictation-realtime-partial", text);
         if (this._dictationPreviewEnabled && text) {
           this.windowManager.showTranscriptionPreview(text);
         }
       };
-      streaming.onFinalTranscript = (text) => event.sender.send("dictation-realtime-final", text);
+      streaming.onFinalTranscript = (text) => {
+        if (canNotify()) event.sender.send("dictation-realtime-final", text);
+      };
+      streaming.onLanguage = (metadata) => {
+        if (canNotify()) event.sender.send("dictation-realtime-language", metadata);
+      };
       streaming.onError = (err) => {
+        if (!canNotify()) return;
         event.sender.send("dictation-realtime-error", err.message);
         if (this._dictationPreviewEnabled) this.windowManager.hideTranscriptionPreview();
       };
@@ -8369,6 +8389,7 @@ class IPCHandlers {
     };
 
     const DICTATION_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+    const ORUKEET_IDLE_TIMEOUT_MS = 60 * 1000;
 
     const clearDictationIdleTimer = () => {
       if (this._dictationIdleTimer) {
@@ -8379,14 +8400,28 @@ class IPCHandlers {
 
     const startDictationIdleTimer = () => {
       clearDictationIdleTimer();
+      const idleTimeoutMs =
+        this._dictationStreaming instanceof OrukeetStreaming
+          ? ORUKEET_IDLE_TIMEOUT_MS
+          : DICTATION_IDLE_TIMEOUT_MS;
       this._dictationIdleTimer = setTimeout(() => {
         if (this._dictationStreaming) {
           debugLogger.debug("Closing idle dictation warmup connection");
           this._dictationStreaming.disconnect().catch(() => {});
           this._dictationStreaming = null;
         }
-      }, DICTATION_IDLE_TIMEOUT_MS);
+      }, idleTimeoutMs);
     };
+
+    // What a dictation connection was opened for; a start or warmup reuses one
+    // only when nothing about the route changed.
+    const dictationConnectionKey = (options) =>
+      JSON.stringify([
+        options.provider || "openai-realtime",
+        options.mode,
+        options.model,
+        options.baseUrl,
+      ]);
 
     const connectDictationStreaming = async (event, options) => {
       // Older renderers did not label the OpenAI dictation adapter. Dictation
@@ -8415,14 +8450,33 @@ class IPCHandlers {
         // default lives here, at the boundary, so the token allowlist stays
         // fail-closed for genuinely unknown providers (#1624).
         const provider = options.provider ?? "openai-realtime";
-        const streaming = new OpenAIRealtimeStreaming();
+        const streaming =
+          provider === "orukeet" ? new OrukeetStreaming() : new OpenAIRealtimeStreaming();
         setupDictationCallbacks(streaming, event);
         // Assign before the token fetch (a real network round trip) so
         // dictation-realtime-send has a live instance to buffer into instead
         // of silently dropping the start of the recording.
         streaming.beginConnecting();
+        streaming.connectionKey = dictationConnectionKey(options);
         this._dictationStreaming = streaming;
         try {
+          if (provider === "orukeet") {
+            if (isCloud) {
+              await connectManagedOrukeet({
+                streaming,
+                getApiUrl,
+                proxyFetch,
+                tokenStore,
+                withPolicyHeaders,
+              });
+            } else {
+              await streaming.connect({
+                apiKey: this.environmentManager.getCustomTranscriptionKey(),
+                baseUrl: options.baseUrl,
+              });
+            }
+            return;
+          }
           const apiKey = await fetchRealtimeToken(event, {
             mode: options.mode,
             provider,
@@ -8446,6 +8500,7 @@ class IPCHandlers {
             });
           }
         } catch (err) {
+          if (provider === "orukeet") await streaming.disconnect().catch(() => {});
           if (this._dictationStreaming === streaming) this._dictationStreaming = null;
           throw err;
         }
@@ -9087,21 +9142,48 @@ class IPCHandlers {
       return result;
     };
 
-    ipcMain.handle("dictation-realtime-warmup", async (event, options = {}) => {
-      try {
+    // Every managed Orukeet connection spends a single-use GPU token, and both
+    // post-dictation re-warm paths fire together. Warmups run one at a time so
+    // the second finds the first's fresh socket and reuses it rather than
+    // discarding it and minting another.
+    const isUnusedOrukeetConnection = (streaming, options) =>
+      streaming instanceof OrukeetStreaming &&
+      streaming.isConnected &&
+      !streaming.failure &&
+      !streaming.finalPromise &&
+      streaming.audioBytesSent === 0 &&
+      streaming.connectionKey === dictationConnectionKey(options);
+
+    const warmupDictationStreaming = async (event, options) => {
+      await this._dictationConnectPromise?.catch(() => {});
+      if (!isUnusedOrukeetConnection(this._dictationStreaming, options)) {
         await connectDictationStreaming(event, options);
         startDictationIdleTimer();
         return { success: true };
-      } catch (err) {
-        return streamingStartFailure(err);
       }
+      startDictationIdleTimer();
+      return { success: true, alreadyWarm: true };
+    };
+
+    let dictationWarmupQueue = Promise.resolve();
+    ipcMain.handle("dictation-realtime-warmup", (event, options = {}) => {
+      const warmup = dictationWarmupQueue
+        .then(() => warmupDictationStreaming(event, options))
+        .catch(streamingStartFailure);
+      dictationWarmupQueue = warmup;
+      return warmup;
     });
 
     ipcMain.handle("dictation-realtime-start", async (event, options = {}) => {
       try {
         clearDictationIdleTimer();
         this._dictationPreviewEnabled = !!options.preview;
-        if (!this._dictationStreaming?.isConnected) await connectDictationStreaming(event, options);
+        if (
+          !this._dictationStreaming?.isConnected ||
+          this._dictationStreaming.connectionKey !== dictationConnectionKey(options)
+        ) {
+          await connectDictationStreaming(event, options);
+        }
         return { success: true };
       } catch (err) {
         return streamingStartFailure(err);
@@ -9110,6 +9192,17 @@ class IPCHandlers {
 
     ipcMain.on("dictation-realtime-send", (_event, buffer) => {
       this._dictationStreaming?.sendAudio(Buffer.from(buffer));
+    });
+
+    ipcMain.handle("dictation-realtime-finalize", async () => {
+      if (!(this._dictationStreaming instanceof OrukeetStreaming)) {
+        return { success: false, error: "No Orukeet recording is active" };
+      }
+      try {
+        return { success: true, ...(await this._dictationStreaming.finalize()) };
+      } catch (error) {
+        return { success: false, error: error.message };
+      }
     });
 
     ipcMain.handle("dictation-realtime-stop", async () => {
@@ -9123,7 +9216,7 @@ class IPCHandlers {
         this.windowManager.hideTranscriptionPreview();
         this._dictationPreviewEnabled = false;
       }
-      return { success: true, text: result.text || "" };
+      return { success: true, ...result, text: result.text || "" };
     });
 
     ipcMain.handle(
@@ -9357,6 +9450,7 @@ class IPCHandlers {
             clientType: "desktop",
             appVersion: app.getVersion(),
             clientVersion: app.getVersion(),
+            streamingFallbackReason: opts.streamingFallbackReason,
             sttProvider: opts.sttProvider,
             sttModel: opts.sttModel,
             sttProcessingMs: opts.sttProcessingMs,
