@@ -2024,6 +2024,7 @@ declare global {
         isUsingNativeShortcut: boolean;
         supportsPushToTalk: boolean;
         pushToTalkUnavailableReason: string | null;
+        linuxInputAccessDenied?: boolean;
       }>;
       getHyprlandConfigStatus?: () => Promise<{ canWrite: boolean; path: string } | null>;
 
