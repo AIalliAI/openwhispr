@@ -78,7 +78,7 @@ const diarizationHost = (endpoint) => {
   } catch {}
   return null;
 };
-const { resolveLocalServerNeeds } = require("./localServerPolicy");
+const { resolveLocalServerNeeds, shouldStopLocalServer } = require("./localServerPolicy");
 const autoStart = require("./autoStart");
 const { getRelaunchOptions, getRelaunchWaiter } = require("./autoStartPolicy");
 const HyprlandShortcutManager = require("./hyprlandShortcut");
@@ -5221,34 +5221,44 @@ class IPCHandlers {
         });
       }
 
-      const localServer = resolveLocalServerNeeds(prefs);
-
-      if (localServer.cleanup) {
-        setVars.CLEANUP_PROVIDER = "local";
-        setVars.LOCAL_CLEANUP_MODEL = localServer.cleanup;
-      } else {
-        clearVars.push("CLEANUP_PROVIDER", "LOCAL_CLEANUP_MODEL");
-      }
       // TODO: drop legacy REASONING_PROVIDER / LOCAL_REASONING_MODEL clears once
       // the read fallback is removed (~2 releases after this lands).
       clearVars.push("REASONING_PROVIDER", "LOCAL_REASONING_MODEL");
 
-      if (localServer.dictationAgent) {
-        setVars.DICTATION_AGENT_PROVIDER = "local";
-        setVars.LOCAL_DICTATION_AGENT_MODEL = localServer.dictationAgent;
-      } else {
-        clearVars.push("DICTATION_AGENT_PROVIDER", "LOCAL_DICTATION_AGENT_MODEL");
-      }
+      // A signed-in window whose workspace policy is still loading reports
+      // unclamped modes, so it neither pre-warms nor stops the shared
+      // llama-server; signed out, the policy never loads.
+      if (prefs.policySettled || !this._hasActiveAccountScope()) {
+        const localServer = resolveLocalServerNeeds(prefs);
 
-      // Stop the shared llama-server only when neither scope still needs it, so
-      // the active scope keeps its server when the other one switches away.
-      if (localServer.stopServer) {
+        if (localServer.cleanup) {
+          setVars.CLEANUP_PROVIDER = "local";
+          setVars.LOCAL_CLEANUP_MODEL = localServer.cleanup;
+        } else {
+          clearVars.push("CLEANUP_PROVIDER", "LOCAL_CLEANUP_MODEL");
+        }
+
+        if (localServer.dictationAgent) {
+          setVars.DICTATION_AGENT_PROVIDER = "local";
+          setVars.LOCAL_DICTATION_AGENT_MODEL = localServer.dictationAgent;
+        } else {
+          clearVars.push("DICTATION_AGENT_PROVIDER", "LOCAL_DICTATION_AGENT_MODEL");
+        }
+
+        // Stop the shared llama-server only when no scope still needs the model
+        // it holds, so the active scopes keep their server when another leaves.
         const modelManager = require("./modelManagerBridge").default;
-        modelManager.stopServer().catch((err) => {
-          debugLogger.error("Failed to stop llama-server on provider switch", {
-            error: err.message,
+        if (shouldStopLocalServer(localServer, modelManager.currentServerModelId)) {
+          if (modelManager.getServerStatus().running) {
+            debugLogger.debug("Stopping llama-server: no scope needs its model", {
+              loadedModel: modelManager.currentServerModelId,
+              neededModels: localServer.models,
+            });
+          }
+          modelManager.stopServer().catch((err) => {
+            debugLogger.error("Failed to stop llama-server", { error: err.message });
           });
-        });
+        }
       }
 
       this._syncStartupEnv(setVars, clearVars);
@@ -5443,16 +5453,6 @@ class IPCHandlers {
 
         this.environmentManager.saveAllKeysToEnvFile().catch(() => {});
         return { success: true, port: modelManager.serverManager.port };
-      } catch (error) {
-        return { success: false, error: error.message };
-      }
-    });
-
-    ipcMain.handle("llama-server-stop", async () => {
-      try {
-        const modelManager = require("./modelManagerBridge").default;
-        await modelManager.stopServer();
-        return { success: true };
       } catch (error) {
         return { success: false, error: error.message };
       }
